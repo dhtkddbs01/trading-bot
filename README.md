@@ -13,7 +13,7 @@
 |---|---|---|
 | ① 실시간 매매 | 토스 WebSocket 체결 → 전략 엔진 → 주문 전 검증 → 주문 실행. 체결 · 잔고는 토스로만 재확인 | 수신 · 구독 ✅ / 엔진 · 주문 미착수 |
 | ② LLM 보조 | 뉴스 · 시장 국면 분석을 **비동기**로 미리 계산해 엔진에는 컨텍스트로만 전달 | 설계 |
-| ③ 틱 적재 · 학습 | 체결틱 → Kafka → Parquet. ML 학습은 데스크탑(GPU), 추론은 미니PC | 로컬 Kafka 기동 ✅ / 적재 진행 중 |
+| ③ 틱 적재 · 학습 | 체결틱 → Kafka → Spark → Parquet(bronze · silver · gold). 장 마감 후 배치는 Airflow 가 묶음. ML 학습은 데스크탑(GPU), 추론은 미니PC | 로컬 Kafka 기동 ✅ / 적재 진행 중 |
 | ④ 운영 · 모니터링 | Prometheus · Grafana · 헬스체크 알림 | 설계 |
 | ⑤ 배포 | GitHub Actions → GHCR → 서버 `docker compose pull` | 다른 프로젝트에서 검증된 경로 재사용 예정 |
 
@@ -22,8 +22,9 @@
 ## 설계 원칙
 
 - **시세 · 주문 · 계좌는 토스증권 하나로.** 시세와 주문을 서로 다른 증권사에서 받으면 체결가 괴리, 종목코드 매핑 같은 문제가 생깁니다. 토스 공식 문서에는 모의투자 언급이 없어서, 주문 로직 검증만 **한국투자증권 모의투자**로 합니다.
-- **주문 판단 경로에는 LLM 도 Kafka 도 넣지 않습니다.** LLM 응답은 초 단위로 느리고, Kafka 장애가 매매를 멈추게 하면 안 됩니다. Kafka 는 틱 적재 · 재처리(replay)용 버퍼로만 씁니다.
-- **원본부터 남깁니다.** 받은 체결 메시지는 파싱하기 전 원본을 그대로 보존합니다. 파싱 로직이 틀려도 원본에서 다시 만들 수 있고, 틱 단위 과거 데이터는 나중에 다시 받을 수 없어 일찍 쌓을수록 자산이 됩니다.
+- **주문 판단 경로에는 LLM · Kafka · Spark · Airflow 를 넣지 않습니다.** LLM 응답은 초 단위로 느리고, Kafka 나 배치 도구의 장애가 매매를 멈추게 하면 안 됩니다. 전략 엔진은 WebSocket 으로 받은 틱을 메모리에서 바로 계산하고, Kafka 는 틱 적재 · 재처리(replay)용 버퍼로만 씁니다.
+- **원본부터 남깁니다.** 받은 체결 메시지는 파싱하기 전 원본을 그대로 bronze 에 보존합니다. 파싱 로직이 틀리면 코드를 고친 뒤 Airflow backfill 로 과거 날짜의 silver · gold 를 원본에서 다시 만듭니다. 틱 단위 과거 데이터는 나중에 다시 받을 수 없어 일찍 쌓을수록 자산이 됩니다.
+- **한 대로 시작하고, 확장 경로는 열어 둡니다.** 소수 종목 체결틱은 1년에 수십 GB 수준(추정)이라 미니PC 한 대로 충분합니다. 대신 Kafka 메시지 key 를 종목코드로 나누고 저장은 Parquet 으로 해서, 종목이 늘면 consumer 와 Spark 작업만 늘리면 되게 합니다.
 - **토큰은 저장해서 재사용합니다.** 토스는 클라이언트당 유효한 토큰이 1개뿐이라(새로 발급하면 이전 토큰은 무효), 실행할 때마다 발급하면 다른 프로세스의 연결이 끊깁니다.
 - **조용히 틀리지 않습니다.** 모든 요청에 `timeout` 과 응답 상태 확인을 넣고, 필수 설정값이 없으면 그 자리에서 에러를 냅니다.
 
@@ -34,17 +35,20 @@
 | 1 | 개발 환경 — venv · `.env` 분리 · 키 커밋 차단 | ✅ |
 | 2 | 토스 토큰 발급(캐시) → REST 현재가 조회 | ✅ |
 | 3 | WebSocket 실시간 체결 구독 | 🔄 구독 ✅ · 장중 체결 수신 확인 예정 |
-| 4 | Kafka 경유 적재 — 수신기가 produce → consumer 가 원본 JSONL 저장 | 🔄 로컬 Kafka(KRaft) 기동 ✅ |
-| 5 | 서버 컨테이너로 평일 장중 상시 수집 | ⏳ |
+| 4 | Kafka 적재 — 수신기가 종목코드를 key 로 produce, 전송 실패 시 로컬 파일로 보존 | 🔄 로컬 Kafka(KRaft) 기동 ✅ |
+| 5 | Spark bronze — Kafka 메시지를 원본 그대로 Parquet 저장 (체크포인트 · 날짜 파티션) | ⏳ |
+| 6 | 서버 컨테이너로 평일 장중 상시 수집 (수신기 · Kafka · bronze) | ⏳ |
+| 7 | Spark silver · gold — 파싱한 체결 → 1분봉 · 학습용 피처 | ⏳ |
+| 8 | Airflow DAG — 휴장일 확인 → bronze → silver → gold → 품질 검사, 과거 날짜 backfill | ⏳ |
 | 이후 | 전략 엔진 → 모의 주문 검증 → 실주문(소액) → 모니터링 | ⏳ |
 
 ## 기술 스택
 
 | 구분 | 사용 중 | 계획 · 검토 |
 |---|---|---|
-| 언어 · 라이브러리 | Python 3.12 · requests · websockets · python-dotenv | confluent-kafka |
-| 데이터 | Kafka 4.3 (KRaft · 로컬 Docker, 연동 진행 중) | Spark · Parquet · DuckDB + dbt(검토) |
-| 오케스트레이션 | — | Airflow(검토) |
+| 언어 · 라이브러리 | Python 3.12 · requests · websockets · python-dotenv | confluent-kafka · PySpark |
+| 데이터 | Kafka 4.3 (KRaft · 로컬 Docker, 연동 진행 중) | Spark (Structured Streaming · 배치) · Parquet (bronze · silver · gold) · DuckDB + dbt(검토) |
+| 오케스트레이션 | — | Airflow (장 마감 후 배치 DAG) |
 | 인프라 | Docker | Docker Compose · GitHub Actions · GHCR · Prometheus · Grafana |
 | 외부 API | 토스증권 Open API (REST · WebSocket) | 한국투자증권 Open API (모의투자) |
 
