@@ -1,0 +1,48 @@
+# 로컬 개발용 — Kafka(상시) + Spark(배치 때만). 6단계 서버 compose 의 초안
+services:
+  kafka:
+    image: apache/kafka:4.3.1
+    container_name: kafka                         # 기존 명령(docker exec kafka ...)을 그대로 쓰려고
+    restart: unless-stopped                       # Docker Desktop 이 켜지면 같이 뜸
+    ports:
+      - "9092:9092"                               # Windows 의 수신기 → localhost:9092
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller      # KRaft — 한 대가 브로커 겸 컨트롤러
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # 주소 2개: 컨테이너끼리(Spark)는 kafka:19092, Windows(수신기)는 localhost:9092
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # 브로커가 1대라 내부 관리 토픽도 복제 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"    # 없는 토픽으로 보내면 조용히 새로 만들지 않고 에러
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data            # 컨테이너를 지워도 메시지가 남게
+    healthcheck:                                  # 브로커가 요청을 받을 수 있는지 10초마다 확인
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  spark:
+    image: apache/spark:4.1.3-scala2.13-java17-python3-ubuntu
+    profiles: ["batch"]                           # up 으로는 안 뜸 — docker compose run 으로 배치 때만
+    depends_on:
+      kafka:
+        condition: service_healthy
+    working_dir: /opt/spark/work-dir
+    volumes:
+      - ./jobs:/opt/spark/work-dir/jobs           # Spark 작업 코드 (bronze.py 등)
+      - ./data:/opt/spark/work-dir/data           # 결과 Parquet — Windows 에서도 보임 (.gitignore)
+      - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - ./.cache/spark-ivy:/opt/spark/work-dir/.ivy2   # Kafka 연결 jar 캐시 (매번 다시 받지 않게)
+
+volumes:
+  kafka-data:
