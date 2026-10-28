@@ -37,7 +37,7 @@
 | 3 | WebSocket 실시간 체결 구독 — 10-08 장중 2종목 43.6만 건 수신, 끊김 없음 | ✅ |
 | 4 | Kafka 적재 — 수신기가 종목코드를 key 로 produce, 전송 실패 시 로컬 파일로 보존 | 🔄 produce 코드 ✅ · 장중 적재 확인 예정 |
 | 5 | Spark bronze — Kafka 메시지를 원본 그대로 Parquet 저장 (체크포인트 · 날짜 파티션) | 🔄 Spark 환경(compose) ✅ · bronze 작성 예정 |
-| 6 | 서버 컨테이너로 평일 장중 상시 수집 (수신기 · Kafka · bronze) | ⏳ |
+| 6 | 서버 컨테이너로 평일 장중 상시 수집 (수신기 · Kafka · bronze) | 🔄 수신기 · Kafka 서버 이전 ✅ (5단계보다 먼저) · bronze 대기 |
 | 7 | Spark silver · gold — 파싱한 체결 → 1분봉 · 학습용 피처 | ⏳ |
 | 8 | Airflow DAG — 휴장일 확인 → bronze → silver → gold → 품질 검사, 과거 날짜 backfill | ⏳ |
 | 이후 | 전략 엔진 → 모의 주문 검증 → 실주문(소액) → 모니터링 | ⏳ |
@@ -59,10 +59,11 @@ trading-bot/
 ├── src/
 │   └── exchange/
 │       ├── toss.py          # 토큰 발급(24시간 캐시 · 401 이면 1회 재발급) · 현재가 조회
-│       └── web_socket.py    # 실시간 체결 구독 · 60초마다 PING · Kafka(ticks.raw)로 produce, 실패 시 data/fallback/
+│       └── web_socket.py    # 실시간 체결 구독 · 60초마다 PING · 끊기면 재연결 · Kafka(ticks.raw)로 produce, 실패 시 data/fallback/
 ├── spark/
 │   └── spark-defaults.conf  # Spark 공통 설정 — Kafka 연결 모듈 · 시간대 KST
-├── docker-compose.yml       # Kafka(상시, 주소 2개 · 볼륨) + Spark(배치 때만)
+├── docker-compose.yml       # Kafka(상시, 주소 2개 · 볼륨) + 수신기(서버, 장 시간) + Spark(배치 때만)
+├── Dockerfile               # 수신기 이미지 (python:3.12-slim)
 ├── docs/architecture.png    # 파이프라인 설계도
 ├── .env.example             # 필요한 키 이름 (값 없음)
 └── requirements.txt
@@ -102,6 +103,31 @@ docker compose run --rm spark /opt/spark/bin/spark-submit jobs/bronze.py
 ```
 
 `src` 안의 모듈끼리 불러오기 때문에 파일 경로가 아니라 **repo 루트에서 `python -m`** 으로 실행합니다.
+
+### 서버(미니PC) 상시 수집
+
+데스크탑을 켜 두지 않아도 되게, 서버에서 Kafka 는 상시 · 수신기는 평일 장 시간에만 돕니다. 수신기는 컨테이너 안에서 `kafka:19092` 로 붙고, 끊기면 5초부터 최대 60초 간격으로 다시 연결합니다.
+
+```bash
+# 처음 한 번 (서버의 .env 에 토스 키가 있어야 한다)
+docker compose up -d kafka
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create --topic ticks.raw --partitions 6 --replication-factor 1 \
+  --config retention.ms=-1          # bronze 가 매일 돌기 전까지는 원본을 지우지 않는다
+docker compose build receiver
+
+# 코드를 바꾼 뒤
+git pull && docker compose build receiver
+
+# crontab — 평일 08:55 시작 · 15:55 종료 (서버 시간대가 KST)
+55 8  * * 1-5  cd ~/trading-bot && docker compose up -d receiver
+55 15 * * 1-5  cd ~/trading-bot && docker compose stop receiver
+
+# 확인
+docker compose logs --tail 20 receiver
+```
+
+⚠️ 수신기가 도는 동안(평일 08:55~15:55) 데스크탑에서 토스 API 를 부르면 토큰이 새로 발급돼 서버 쪽 토큰이 무효가 됩니다(클라이언트당 토큰 1개). 서버는 401 을 받으면 토큰을 새로 받아 다시 붙지만, 그 순간 데스크탑 토큰이 무효가 됩니다.
 
 ## 보안
 

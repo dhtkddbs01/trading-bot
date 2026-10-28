@@ -1,15 +1,20 @@
-"""토스증권 실시간 체결 수신 — 착수 3단계 (WebSocket)."""
+"""토스증권 실시간 체결 수신 → Kafka — 착수 3 · 4단계 (WebSocket)."""
 import asyncio
 import json
+import os
+import signal
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 import websockets
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from confluent_kafka import Producer
 from src.exchange.toss import ROOT, get_token    # 2단계 토큰 함수 재사용 (24시간 저장·재사용) · repo 루트 경로
 
 WS_URL = "wss://openapi-ws.tossinvest.com/ws/v1"
-producer = Producer({'bootstrap.servers': 'localhost:9092'})
+KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "127.0.0.1:9092")   # 서버 컨테이너에서는 compose 가 kafka:19092 를 넣어 줌
+producer = Producer({'bootstrap.servers': KAFKA_BOOTSTRAP})
 FALLBACK_DIR = ROOT / "data" / "fallback"         # Kafka 전송에 실패한 원본을 남기는 곳 (.gitignore 로 git 에서 빠짐)
 KST = timezone(timedelta(hours=9))                # 파일 날짜는 한국 시간 기준 (서버 컨테이너는 UTC 라서)
 
@@ -64,13 +69,36 @@ async def run(codes: list[str]) -> None:
                 handle(raw)
         finally:
             timeout = 5.0
-            producer.flush(timeout)                         # 종료 시점에 남은 메시지 전송
+            left = producer.flush(timeout)                  # 종료 시점에 남은 메시지 전송 (못 보낸 개수를 돌려줌)
+            print(f"연결 정리 — Kafka 로 못 보낸 메시지 {left}건")
             ping_task.cancel()                              # 끝날 때 PING 작업도 정리
+
+
+async def run_forever(codes: list[str]) -> None:
+    """끊기면 다시 연결 — 5초부터 두 배씩, 최대 60초 간격"""
+    delay = 5
+    while True:
+        started = time.monotonic()
+        try:
+            await run(codes)                                # 서버가 정상적으로 닫아도 장중이면 다시 연결
+            print("연결이 닫힘")
+        except InvalidStatus as e:                          # 연결 단계에서 거절 (HTTP 상태코드)
+            print(f"연결 거절: HTTP {e.response.status_code}")
+            if e.response.status_code == 401:               # 다른 곳에서 토큰을 새로 받아 저장된 토큰이 무효가 된 경우
+                get_token(force_new=True)
+        except (ConnectionClosed, OSError) as e:            # 연결 중 끊김 · 네트워크 오류
+            print(f"연결 끊김: {e!r}")
+        if time.monotonic() - started > 60:                 # 1분 넘게 잘 붙어 있었으면 간격을 처음부터
+            delay = 5
+        print(f"{delay}초 뒤 다시 연결")
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 60)
 
 
 if __name__ == "__main__":
     codes = sys.argv[1:] or ["005930"]                      # 인자가 비어 있으면(거짓) 005930
+    signal.signal(signal.SIGTERM, signal.default_int_handler)   # docker stop · timeout 의 종료 신호도 Ctrl+C 처럼 → finally 의 flush 가 돈다
     try:
-        asyncio.run(run(codes))
+        asyncio.run(run_forever(codes))
     except KeyboardInterrupt:
-        print("종료 (Ctrl+C)")
+        print("종료 (Ctrl+C · 종료 신호)")
