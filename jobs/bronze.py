@@ -3,7 +3,7 @@
 받은 원본을 파싱하지 않고 그대로 날짜별로 저장한다. 어디까지 읽었는지(offset)는 체크포인트에 남아서,
 다시 돌리면 그 다음 메시지부터 읽는다. availableNow — 지금까지 쌓인 것만 읽고 끝난다.
 
-실행: docker compose run --rm spark /opt/spark/bin/spark-submit jobs/bronze.py
+실행 방법은 Spark Standalone 클러스터를 구축하면서 정한다.
 """
 from pyspark.sql import SparkSession, functions as F
 
@@ -15,7 +15,7 @@ CHECKPOINT = "data/checkpoints/bronze_ticks"      # 어디까지 읽었는지 �
 
 def main() -> None:
     spark = SparkSession.builder.appName("bronze-ticks").getOrCreate()
-    # 시간대(Asia/Seoul)와 Kafka 연결 모듈은 spark/spark-defaults.conf 에서 들어온다
+    # TODO 0: 시간대(Asia/Seoul)와 Kafka 연결 모듈(spark-sql-kafka)을 어디서 넣을지 — 클러스터 구축 때 정한다
 
     # TODO 1: Kafka 를 스트림으로 읽기 — spark.readStream.format("kafka")
     #         옵션: kafka.bootstrap.servers, subscribe, startingOffsets
