@@ -56,7 +56,8 @@ services:
         max-file: "5"
 
   spark:
-    image: apache/spark:4.1.3-scala2.13-java17-python3-ubuntu
+    build: ./spark                                # apache/spark 4.1.3 + uid 1000 계정 (결과가 서버 사용자 소유로)
+    image: trading-bot-spark
     profiles: ["batch"]                           # up 으로는 안 뜸 — docker compose run 으로 배치 때만
     depends_on:
       kafka:
