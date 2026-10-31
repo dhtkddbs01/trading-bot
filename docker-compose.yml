@@ -1,4 +1,4 @@
-# 로컬 개발용 — Kafka(상시) + Spark(배치 때만). 6단계 서버 compose 의 초안
+# Kafka(상시) + 수신기(서버에서 장 시간에만). 데스크탑 · 미니PC 공용
 services:
   kafka:
     image: apache/kafka:4.3.1
@@ -54,19 +54,6 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-
-  spark:
-    image: apache/spark:4.1.3-scala2.13-java17-python3-ubuntu
-    profiles: ["batch"]                           # up 으로는 안 뜸 — docker compose run 으로 배치 때만
-    depends_on:
-      kafka:
-        condition: service_healthy
-    working_dir: /opt/spark/work-dir
-    volumes:
-      - ./jobs:/opt/spark/work-dir/jobs           # Spark 작업 코드 (bronze.py 등)
-      - ./data:/opt/spark/work-dir/data           # 결과 Parquet — Windows 에서도 보임 (.gitignore)
-      - ./spark/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
-      - ./.cache/spark-ivy:/opt/spark/work-dir/.ivy2   # Kafka 연결 jar 캐시 (매번 다시 받지 않게)
 
 volumes:
   kafka-data:

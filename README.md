@@ -36,7 +36,7 @@
 | 2 | 토스 토큰 발급(캐시) → REST 현재가 조회 | ✅ |
 | 3 | WebSocket 실시간 체결 구독 — 10-08 장중 2종목 43.6만 건 수신, 끊김 없음 | ✅ |
 | 4 | Kafka 적재 — 수신기가 종목코드를 key 로 produce, 전송 실패 시 로컬 파일로 보존 (10-29 · 30 실측: 하루 49~68만 건, 수신 = 적재 일치, 유실 0) | ✅ |
-| 5 | Spark bronze — Kafka 메시지를 원본 그대로 Parquet 저장 (체크포인트 · 날짜 파티션) | 🔄 Spark 환경(compose) ✅ · bronze 작성 예정 |
+| 5 | Spark bronze — Kafka 메시지를 원본 그대로 Parquet 저장 (체크포인트 · 날짜 파티션) | 🔄 Spark Standalone 클러스터 구축 예정 · bronze 뼈대 |
 | 6 | 서버 컨테이너로 평일 장중 상시 수집 (수신기 · Kafka · bronze) | 🔄 수신기 · Kafka 서버 상시 수집 ✅ (10-29~, 5단계보다 먼저) · bronze 대기 |
 | 7 | Spark silver · gold — 파싱한 체결 → 1분봉 · 학습용 피처 | ⏳ |
 | 8 | Airflow DAG — 휴장일 확인 → bronze → silver → gold → 품질 검사, 과거 날짜 backfill | ⏳ |
@@ -47,7 +47,7 @@
 | 구분 | 사용 중 | 계획 · 검토 |
 |---|---|---|
 | 언어 · 라이브러리 | Python 3.12 · requests · websockets · python-dotenv · confluent-kafka | PySpark |
-| 데이터 | Kafka 4.3.1 (KRaft · 로컬 Docker Compose) | Spark 4.1.3 (Structured Streaming · 배치, compose 준비 완료) · Parquet (bronze · silver · gold) · DuckDB + dbt(검토) |
+| 데이터 | Kafka 4.3.1 (KRaft · 로컬 Docker Compose) | Spark Standalone 클러스터 (마스터 · 워커 2 · 공유 저장소 MinIO, Structured Streaming · 배치) · Parquet (bronze · silver · gold) · DuckDB + dbt(검토) |
 | 오케스트레이션 | — | Airflow (장 마감 후 배치 DAG) |
 | 인프라 | Docker · Docker Compose | GitHub Actions · GHCR · Prometheus · Grafana |
 | 외부 API | 토스증권 Open API (REST · WebSocket) | 한국투자증권 Open API (모의투자) |
@@ -60,9 +60,9 @@ trading-bot/
 │   └── exchange/
 │       ├── toss.py          # 토큰 발급(24시간 캐시 · 401 이면 1회 재발급) · 현재가 조회
 │       └── web_socket.py    # 실시간 체결 구독 · 60초마다 PING · 끊기면 재연결 · Kafka(ticks.raw)로 produce, 실패 시 data/fallback/
-├── spark/
-│   └── spark-defaults.conf  # Spark 공통 설정 — Kafka 연결 모듈 · 시간대 KST
-├── docker-compose.yml       # Kafka(상시, 주소 2개 · 볼륨) + 수신기(서버, 장 시간) + Spark(배치 때만)
+├── jobs/
+│   └── bronze.py            # Kafka → bronze Parquet (작성 중, Spark 클러스터에서 실행)
+├── docker-compose.yml       # Kafka(상시, 주소 2개 · 볼륨) + 수신기(서버, 장 시간)
 ├── Dockerfile               # 수신기 이미지 (python:3.12-slim)
 ├── docs/architecture.png    # 파이프라인 설계도
 ├── .env.example             # 필요한 키 이름 (값 없음)
@@ -96,11 +96,7 @@ python -m src.exchange.web_socket 005930 000660
 
 # 6) Kafka 에 쌓인 메시지 보기
 docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 `
-  --topic ticks.raw --from-beginning --property print.key=true
-
-# 7) (5단계) Spark 작업 — 배치 때만 컨테이너를 띄웠다가 끝나면 지운다 (jobs/bronze.py 는 작성 예정)
-docker compose run --rm spark /opt/spark/bin/spark-submit jobs/bronze.py
-```
+  --topic ticks.raw --from-beginning --property print.key=true```
 
 `src` 안의 모듈끼리 불러오기 때문에 파일 경로가 아니라 **repo 루트에서 `python -m`** 으로 실행합니다.
 
