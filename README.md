@@ -36,7 +36,7 @@
 | 2 | 토스 토큰 발급(캐시) → REST 현재가 조회 | ✅ |
 | 3 | WebSocket 실시간 체결 구독 — 10-08 장중 2종목 43.6만 건 수신, 끊김 없음 | ✅ |
 | 4 | Kafka 적재 — 수신기가 종목코드를 key 로 produce, 전송 실패 시 로컬 파일로 보존 (10-29 · 30 실측: 하루 49~68만 건, 수신 = 적재 일치, 유실 0) | ✅ |
-| 5 | Spark bronze — Kafka 메시지를 원본 그대로 Parquet 저장 (체크포인트 · 날짜 파티션) | 🔄 Spark Standalone 클러스터 — 마스터 · 워커 2(각 2코어 · 2GB) ✅ (데스크탑) · Kafka 연결 · MinIO · bronze 남음 |
+| 5 | Spark bronze — Kafka 메시지를 원본 그대로 Parquet 저장 (체크포인트 · 날짜 파티션) | 🔄 Spark Standalone 클러스터 — 마스터 · 워커 2(각 2코어 · 2GB) ✅ · 클러스터에서 Kafka 읽기 ✅ (데스크탑) · MinIO · bronze 남음 |
 | 6 | 서버 컨테이너로 평일 장중 상시 수집 (수신기 · Kafka · bronze) | 🔄 수신기 · Kafka 서버 상시 수집 ✅ (10-29~, 5단계보다 먼저) · bronze 대기 |
 | 7 | Spark silver · gold — 파싱한 체결 → 1분봉 · 학습용 피처 | ⏳ |
 | 8 | Airflow DAG — 휴장일 확인 → bronze → silver → gold → 품질 검사, 과거 날짜 backfill | ⏳ |
@@ -61,8 +61,9 @@ trading-bot/
 │       ├── toss.py          # 토큰 발급(24시간 캐시 · 401 이면 1회 재발급) · 현재가 조회
 │       └── web_socket.py    # 실시간 체결 구독 · 60초마다 PING · 끊기면 재연결 · Kafka(ticks.raw)로 produce, 실패 시 data/fallback/
 ├── jobs/
+│   ├── kafka_count.py       # 클러스터 → Kafka 연결 시험 (ticks.raw 개수 · 파티션별 개수)
 │   └── bronze.py            # Kafka → bronze Parquet (작성 중, Spark 클러스터에서 실행)
-├── docker-compose.yml       # Kafka(상시, 주소 2개 · 볼륨) + 수신기(서버, 장 시간) + Spark 마스터 · 워커 2
+├── docker-compose.yml       # Kafka(상시, 주소 2개 · 볼륨) + 수신기(서버, 장 시간) + Spark 마스터(jobs/ 연결) · 워커 2
 ├── Dockerfile               # 수신기 이미지 (python:3.12-slim)
 ├── docs/architecture.png    # 파이프라인 설계도
 ├── .env.example             # 필요한 키 이름 (값 없음)
@@ -103,6 +104,13 @@ docker compose up -d spark-master spark-worker-1 spark-worker-2
 #    http://localhost:8080 에서 워커 2개가 ALIVE 인지 확인 → 예제 작업을 클러스터에 보내기
 docker compose exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 `
   /opt/spark/examples/src/main/python/pi.py 20
+#    클러스터에서 Kafka(ticks.raw) 읽기 — Kafka 연결 모듈은 처음 실행 때 내려받는다
+#    (이미지의 spark 사용자는 홈 폴더가 없어서 받은 jar 를 /tmp/.ivy2 에 둔다)
+docker compose exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 `
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.3 `
+  --conf spark.jars.ivy=/tmp/.ivy2 `
+  --conf spark.sql.session.timeZone=Asia/Seoul `
+  jobs/kafka_count.py
 ```
 
 `src` 안의 모듈끼리 불러오기 때문에 파일 경로가 아니라 **repo 루트에서 `python -m`** 으로 실행합니다.
