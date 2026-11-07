@@ -1,0 +1,5 @@
+# trading-bot 전용 칸 — Garage · Kafka · Spark · 수신기를 모두 여기에 (시스템 Pod 의 kube-system 과 분리)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trading-bot
